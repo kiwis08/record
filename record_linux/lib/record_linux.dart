@@ -95,12 +95,14 @@ class RecordLinux extends RecordPlatform {
 
     await _callPhiola(
       [
+        '-Background',
         'record',
         '-o', path,
         '-rate', '${config.sampleRate}',
         '-channels', '${config.numChannels}',
         if (config.device != null) '-dev',
         if (config.device != null) config.device!.id,
+        '-remote',
       ],
       onStarted: () {
         _path = path;
