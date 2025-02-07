@@ -99,7 +99,8 @@ class RecordLinux extends RecordPlatform {
         '-o', path,
         '-rate', '${config.sampleRate}',
         '-channels', '${config.numChannels}',
-        if (config.device != null) '-dev', config.device!.id,
+        if (config.device != null) '-dev',
+        if (config.device != null) config.device!.id,
       ],
       onStarted: () {
         _path = path;
