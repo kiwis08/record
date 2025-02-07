@@ -113,7 +113,15 @@ class RecordLinux extends RecordPlatform {
   @override
   Future<String?> stop(String recorderId) async {
     final path = _path;
-    await _callPhiola(['remote', 'stop'], recorderId: recorderId);
+    try {
+      await _callPhiola(['remote', 'stop'], recorderId: recorderId);
+    } catch (e) {
+      if (e.toString().contains('No such file or directory')) {
+        return null;
+      } else {
+        rethrow;
+      }
+    }
     _updateState(RecordState.stop);
     return path;
   }
