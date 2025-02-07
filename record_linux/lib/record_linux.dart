@@ -5,10 +5,13 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:record_platform_interface/record_platform_interface.dart';
 
-const _fmediaBin = 'fmedia';
+/// The name of the Phiola executable.
+const _phiolaBin = 'phiola';
 
+/// A constant used to form a unique pipe name for global commands.
 const _pipeProcName = 'record_linux';
 
+/// A Linux implementation of the RecordPlatform using Phiola.
 class RecordLinux extends RecordPlatform {
   static void registerWith() {
     RecordPlatform.instance = RecordLinux();
@@ -19,22 +22,26 @@ class RecordLinux extends RecordPlatform {
   StreamController<RecordState>? _stateStreamCtrl;
 
   @override
-  Future<void> create(String recorderId) async {}
-
-  @override
-  Future<void> dispose(String recorderId) {
-    _stateStreamCtrl?.close();
-    return stop(recorderId);
+  Future<void> create(String recorderId) async {
+    // Initialization code (if needed) goes here.
   }
 
   @override
-  Future<Amplitude> getAmplitude(String recorderId) {
-    return Future.value(Amplitude(current: -160.0, max: -160.0));
+  Future<void> dispose(String recorderId) async {
+    await stop(recorderId);
+    await _stateStreamCtrl?.close();
   }
 
   @override
-  Future<bool> hasPermission(String recorderId) {
-    return Future.value(true);
+  Future<Amplitude> getAmplitude(String recorderId) async {
+    // Phiola may not support amplitude queries; return a default value.
+    return Amplitude(current: -160.0, max: -160.0);
+  }
+
+  @override
+  Future<bool> hasPermission(String recorderId) async {
+    // On Linux, permissions are generally granted by default.
+    return true;
   }
 
   @override
@@ -53,20 +60,20 @@ class RecordLinux extends RecordPlatform {
   }
 
   @override
-  Future<bool> isPaused(String recorderId) {
-    return Future.value(_state == RecordState.pause);
+  Future<bool> isPaused(String recorderId) async {
+    return _state == RecordState.pause;
   }
 
   @override
-  Future<bool> isRecording(String recorderId) {
-    return Future.value(_state == RecordState.record);
+  Future<bool> isRecording(String recorderId) async {
+    return _state == RecordState.record;
   }
 
   @override
   Future<void> pause(String recorderId) async {
     if (_state == RecordState.record) {
-      await _callFMedia(['--globcmd=pause'], recorderId: recorderId);
-
+      // Tell Phiola to pause recording.
+      await _callPhiola(['--globcmd=pause'], recorderId: recorderId);
       _updateState(RecordState.pause);
     }
   }
@@ -74,28 +81,32 @@ class RecordLinux extends RecordPlatform {
   @override
   Future<void> resume(String recorderId) async {
     if (_state == RecordState.pause) {
-      await _callFMedia(['--globcmd=unpause'], recorderId: recorderId);
-
+      // Tell Phiola to resume recording.
+      await _callPhiola(['--globcmd=unpause'], recorderId: recorderId);
       _updateState(RecordState.record);
     }
   }
 
   @override
   Future<void> start(
-    String recorderId,
-    RecordConfig config, {
-    required String path,
-  }) async {
+      String recorderId,
+      RecordConfig config, {
+        required String path,
+      }) async {
+    // Stop any existing recording.
     await stop(recorderId);
 
     final file = File(path);
-    if (file.existsSync()) await file.delete();
+    if (file.existsSync()) {
+      await file.delete();
+    }
 
-    final supported = await isEncoderSupported(recorderId, config.encoder);
-    if (!supported) {
+    // Verify that the encoder is supported.
+    if (!await isEncoderSupported(recorderId, config.encoder)) {
       throw Exception('${config.encoder} is not supported.');
     }
 
+    // Convert number of channels to a string as expected by Phiola.
     String numChannels;
     if (config.numChannels == 6) {
       numChannels = '5.1';
@@ -104,28 +115,31 @@ class RecordLinux extends RecordPlatform {
     } else if (config.numChannels == 1 || config.numChannels == 2) {
       numChannels = config.numChannels.toString();
     } else {
-      throw Exception('${config.numChannels} config is not supported.');
+      throw Exception(
+          '${config.numChannels} channels configuration is not supported.');
     }
 
-    await _callFMedia(
-      [
-        '--notui',
-        '--background',
-        '--record',
-        '--out=$path',
-        '--rate=${config.sampleRate}',
-        '--channels=$numChannels',
-        '--globcmd=listen',
-        '--gain=6.0',
-        if (config.device != null) '--dev-capture=${config.device!.id}',
-        ..._getEncoderSettings(config.encoder, config.bitRate),
-      ],
+    final args = <String>[
+      '--notui',
+      '--background',
+      '--record',
+      '--out=$path',
+      '--rate=${config.sampleRate}',
+      '--channels=$numChannels',
+      '--globcmd=listen',
+      '--gain=6.0',
+      if (config.device != null) '--dev-capture=${config.device!.id}',
+      ..._getEncoderSettings(config.encoder, config.bitRate),
+    ];
+
+    await _callPhiola(
+      args,
+      recorderId: recorderId,
+      consumeOutput: false,
       onStarted: () {
         _path = path;
         _updateState(RecordState.record);
       },
-      consumeOutput: false,
-      recorderId: recorderId,
     );
   }
 
@@ -133,23 +147,20 @@ class RecordLinux extends RecordPlatform {
   Future<String?> stop(String recorderId) async {
     final path = _path;
 
-    await _callFMedia(['--globcmd=stop'], recorderId: recorderId);
-    await _callFMedia(['--globcmd=quit'], recorderId: recorderId);
-
+    // Signal Phiola to stop recording and then quit.
+    await _callPhiola(['--globcmd=stop'], recorderId: recorderId);
+    await _callPhiola(['--globcmd=quit'], recorderId: recorderId);
     _updateState(RecordState.stop);
-
     return path;
   }
 
   @override
   Future<void> cancel(String recorderId) async {
     final path = await stop(recorderId);
-
     if (path != null) {
       final file = File(path);
-
       if (file.existsSync()) {
-        file.deleteSync();
+        await file.delete();
       }
     }
   }
@@ -157,193 +168,154 @@ class RecordLinux extends RecordPlatform {
   @override
   Future<List<InputDevice>> listInputDevices(String recorderId) async {
     final outStreamCtrl = StreamController<List<int>>();
+    final lines = <String>[];
 
-    final out = <String>[];
+    // Capture the output of the Phiola device listing.
     outStreamCtrl.stream
         .transform(utf8.decoder)
         .transform(const LineSplitter())
-        .listen((chunk) {
-      out.add(chunk);
+        .listen((line) {
+      lines.add(line);
     });
 
     try {
-      await _callFMedia(['--list-dev'],
-          recorderId: '', outStreamCtrl: outStreamCtrl);
-
-      return _listInputDevices(recorderId, out);
+      await _callPhiola(
+        ['--list-dev'],
+        recorderId: recorderId,
+        outStreamCtrl: outStreamCtrl,
+      );
+      return _parseInputDevices(lines);
     } finally {
-      outStreamCtrl.close();
+      await outStreamCtrl.close();
     }
   }
 
   @override
   Stream<RecordState> onStateChanged(String recorderId) {
-    _stateStreamCtrl ??= StreamController(
+    _stateStreamCtrl ??= StreamController<RecordState>(
       onCancel: () {
         _stateStreamCtrl?.close();
         _stateStreamCtrl = null;
       },
     );
-
     return _stateStreamCtrl!.stream;
   }
 
+  /// Returns command-line arguments for the selected encoder.
   List<String> _getEncoderSettings(AudioEncoder encoder, int bitRate) {
     switch (encoder) {
       case AudioEncoder.aacLc:
-        return ['--aac-profile=LC', ..._getAacQuality(bitRate)];
+        return ['--aac-profile=LC', '--bitrate=${bitRate}k'];
       case AudioEncoder.aacHe:
-        return ['--aac-profile=HEv2', ..._getAacQuality(bitRate)];
+        return ['--aac-profile=HEv2', '--bitrate=${bitRate}k'];
       case AudioEncoder.flac:
-        return ['--flac-compression=6', '--format=int16'];
+        return ['--flac-compression=6'];
       case AudioEncoder.opus:
-        final rate = (bitRate ~/ 1000).clamp(6, 510);
-        return ['--opus.bitrate=$rate'];
+        return ['--opus.bitrate=${bitRate}k'];
       case AudioEncoder.wav:
         return [];
       default:
-        return [];
+        throw Exception('Encoder ${encoder.toString()} not supported by Phiola.');
     }
   }
 
-  List<String> _getAacQuality(int bitRate) {
-    final rate = bitRate ~/ 1000;
-    // Prefer VBR
-    // if (rate <= 320) {
-    //   final quality = (rate / 64).ceil().clamp(1, 5).toInt();
-    //   return ['--aac-quality=$quality'];
-    // }
-
-    final quality = rate.clamp(8, 800).toInt();
-    return ['--aac-quality=$quality'];
-  }
-
-  Future<void> _callFMedia(
-    List<String> arguments, {
-    required String recorderId,
-    StreamController<List<int>>? outStreamCtrl,
-    VoidCallback? onStarted,
-    bool consumeOutput = true,
-  }) async {
-    final process = await Process.start(_fmediaBin, [
+  /// Calls the Phiola process with the given arguments.
+  Future<void> _callPhiola(
+      List<String> arguments, {
+        required String recorderId,
+        StreamController<List<int>>? outStreamCtrl,
+        VoidCallback? onStarted,
+        bool consumeOutput = true,
+      }) async {
+    // Start the Phiola process.
+    final process = await Process.start(_phiolaBin, [
       '--globcmd.pipe-name=$_pipeProcName$recorderId',
       ...arguments,
     ]);
 
+    // Immediately invoke the onStarted callback if provided.
     if (onStarted != null) {
       onStarted();
     }
 
-    // Listen to both stdout & stderr to not leak system resources.
+    // Consume output streams to avoid process hanging.
     if (consumeOutput) {
-      final out = outStreamCtrl ?? StreamController<List<int>>();
-      if (outStreamCtrl == null) out.stream.listen((event) {});
-      final err = StreamController<List<int>>();
-      err.stream.listen((event) {});
+      final outController = outStreamCtrl ?? StreamController<List<int>>();
+      if (outStreamCtrl == null) {
+        outController.stream.listen((_) {});
+      }
+      final errController = StreamController<List<int>>();
+      errController.stream.listen((_) {});
 
       await Future.wait([
-        out.addStream(process.stdout),
-        err.addStream(process.stderr),
+        outController.addStream(process.stdout),
+        errController.addStream(process.stderr),
       ]);
 
-      if (outStreamCtrl == null) out.close();
-      err.close();
+      if (outStreamCtrl == null) {
+        await outController.close();
+      }
+      await errController.close();
     }
   }
 
-  // Playback/Loopback:
-  // device #1: FOO (High Definition Audio) - Default
-  // Default Format: 2 channel, 48000 Hz
-  // Capture:
-  // device #1: Microphone (High Definition Audio Device) - Default
-  // Default Format: 2 channel, 44100 Hz
-  Future<List<InputDevice>> _listInputDevices(
-    String recorderId,
-    List<String> out,
-  ) async {
+  /// Parses the output of the device listing command and returns a list
+  /// of [InputDevice] instances.
+  List<InputDevice> _parseInputDevices(List<String> lines) {
     final devices = <InputDevice>[];
-    var deviceLine = '';
+    String currentDeviceLine = '';
 
-    void extract({String? secondLine}) {
-      if (deviceLine.isNotEmpty) {
-        final device = _extractDevice(deviceLine, secondLine: secondLine);
-        if (device != null) devices.add(device);
-        deviceLine = '';
+    void extractDevice({String? details}) {
+      if (currentDeviceLine.isNotEmpty) {
+        final device = _extractDevice(currentDeviceLine, details: details);
+        if (device != null) {
+          devices.add(device);
+        }
+        currentDeviceLine = '';
       }
     }
 
-    var hasCaptureDevices = false;
-    for (var line in out) {
-      // Forwards to capture devices
-      if (!hasCaptureDevices) {
-        hasCaptureDevices = (line == 'Capture:');
+    bool captureSection = false;
+    for (final line in lines) {
+      // Look for the "Capture:" header before processing devices.
+      if (!captureSection) {
+        if (line.trim() == 'Capture:') {
+          captureSection = true;
+        }
         continue;
       }
 
       if (line.startsWith(RegExp(r'^device #'))) {
-        // Extract previous device if second line was missing
-        extract();
-        deviceLine = line;
+        // Found a new device line; extract any previous device.
+        extractDevice();
+        currentDeviceLine = line;
       } else if (line.startsWith(RegExp(r'^\s*Default Format:'))) {
-        extract(secondLine: line);
+        extractDevice(details: line);
       }
     }
-
-    // Extract previous device if second line was missing
-    extract();
-
+    // Extract any remaining device.
+    extractDevice();
     return devices;
   }
 
-  InputDevice? _extractDevice(String firstLine, {String? secondLine}) {
-    final match = RegExp(r'(?:.*device #)(\d+): (\w.+)').firstMatch(firstLine);
-    if (match == null || match.groupCount != 2) return null;
-
-    // ID
+  /// Extracts an [InputDevice] from the given text lines.
+  InputDevice? _extractDevice(String firstLine, {String? details}) {
+    final match = RegExp(r'device #(\d+): (.+)').firstMatch(firstLine);
+    if (match == null) return null;
     final id = match.group(1);
-    if (id == null) return null;
+    var label = match.group(2) ?? '';
 
-    // Label
-    var label = match.group(2)!;
-    // Remove default from label
-    final index = label.indexOf(' - Default');
-    if (index != -1) {
-      label = label.substring(0, index);
+    // Remove the " - Default" suffix if present.
+    if (label.contains(' - Default')) {
+      label = label.replaceAll(' - Default', '');
     }
-
-    // int? channels;
-    // int? sampleRate;
-    // if (secondLine != null) {
-    //   final match = RegExp(
-    //     r'(?:.*Default Format: )(\d+) channel, (\d+) Hz',
-    //   ).firstMatch(secondLine);
-
-    //   if (match != null && match.groupCount == 2) {
-    //     // Number of channels
-    //     final channelsStr = match.group(1);
-    //     channels = channelsStr != null ? int.tryParse(channelsStr) : null;
-
-    //     // Sampling rate
-    //     final samplingStr = match.group(2);
-    //     sampleRate = samplingStr != null ? int.tryParse(samplingStr) : null;
-    //   }
-    // }
-
-    return InputDevice(
-      id: id,
-      label: label,
-      // channels: channels,
-      // sampleRate: sampleRate,
-    );
+    return InputDevice(id: id!, label: label);
   }
 
-  void _updateState(RecordState state) {
-    if (_state == state) return;
-
-    _state = state;
-
-    if (_stateStreamCtrl?.hasListener ?? false) {
-      _stateStreamCtrl?.add(state);
-    }
+  /// Updates the internal recording state and notifies listeners.
+  void _updateState(RecordState newState) {
+    if (_state == newState) return;
+    _state = newState;
+    _stateStreamCtrl?.add(newState);
   }
 }
